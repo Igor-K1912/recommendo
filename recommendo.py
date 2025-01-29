@@ -4,6 +4,8 @@ import joblib
 import re
 import os
 import random
+import streamlit as st
+import dask.dataframe as dd
 
 def create_map(df, columns):
     map_result = {}
@@ -19,28 +21,45 @@ pd.set_option('display.max_columns', None)
 pd.set_option('display.width', None)
 
 folder_path = ''
+cat_columns = segm_columns = map_siteid_domain = map_name_display_name = None
 
-# Read column names from the CSV file
-column_names = pd.read_csv(folder_path + 'samples_merged_df.csv', nrows=0).columns
-columns_to_convert = [col for col in column_names if col.startswith(('i_', 'cm_'))]
-dtype_dict = {col: 'int8' for col in columns_to_convert}
-dtype_dict['ic_site_id'] = 'uint16'
-dtype_dict['CTR'] = 'float16'
-#dtype_dict['iCTR'] = 'float16'
-# Read the CSV file with the specified dtypes
 
-print('Loading data ... ')
-samples_df = pd.read_csv(folder_path + 'samples_merged_df.csv', dtype=dtype_dict)
-cat_columns = samples_df.filter(regex=f'^i_').columns
-segm_columns = samples_df.filter(regex=f'^cm_').columns
-all_keys_values_df = pd.read_csv(folder_path + 'key_value.csv')
-filtered_all_keys_values_df = all_keys_values_df[all_keys_values_df['name'].notna() & all_keys_values_df['name'].str.startswith(('i_', 'cm_'))]
-site_id_domain_df = pd.read_csv(folder_path + 'map_icsiteid_domain.csv')
-map_name_display_name = create_map(filtered_all_keys_values_df, cat_columns) | create_map(filtered_all_keys_values_df, segm_columns)
-map_siteid_domain = dict(zip(site_id_domain_df['ic_site_id'], site_id_domain_df['url_domain']))
-samples_df['ic_site_id'] = samples_df['ic_site_id'].map(map_siteid_domain).fillna('Unknown')
-samples_df.rename(columns={'ic_site_id': 'domain_url'}, inplace=True)
+#@st.cache_data
+def load_data(path):
+    global cat_columns, segm_columns, map_siteid_domain, map_name_display_name
 
+    #st.write('Loading data ... ')
+
+    # Read column names from the CSV file
+    column_names = pd.read_csv(folder_path + 'samples_merged_df.csv', nrows=0).columns
+    columns_to_convert = [col for col in column_names if col.startswith(('i_', 'cm_'))]
+    dtype_dict = {col: 'int8' for col in columns_to_convert}
+    dtype_dict['ic_site_id'] = 'uint16'
+    dtype_dict['CTR'] = 'float16'
+    # dtype_dict['iCTR'] = 'float16'
+    # Read the CSV file with the specified dtypes
+
+    # df_ = pd.read_csv(path, dtype=dtype_dict)
+    # cat_columns = df_.filter(regex=f'^i_').columns
+    # segm_columns = df_.filter(regex=f'^cm_').columns
+    df_ = dd.read_csv(path, dtype=dtype_dict)
+    cat_columns = df_.columns[df_.columns.str.match('^i_')]
+    segm_columns = df_.columns[df_.columns.str.match('^cm_')]
+
+    all_keys_values_df = pd.read_csv(folder_path + 'key_value.csv')
+    filtered_all_keys_values_df = all_keys_values_df[all_keys_values_df['name'].notna() & all_keys_values_df['name'].str.startswith(('i_', 'cm_'))]
+    site_id_domain_df = pd.read_csv(folder_path + 'map_icsiteid_domain.csv')
+    map_name_display_name = create_map(filtered_all_keys_values_df, cat_columns) | create_map(
+        filtered_all_keys_values_df, segm_columns)
+    map_siteid_domain = dict(zip(site_id_domain_df['ic_site_id'], site_id_domain_df['url_domain']))
+    # df_['ic_site_id'] = df_['ic_site_id'].map(map_siteid_domain).fillna('Unknown')
+    # df_.rename(columns={'ic_site_id': 'domain_url'}, inplace=True)
+
+    df_['ic_site_id'] = df_['ic_site_id'].map_partitions(lambda s: s.map(map_siteid_domain)).fillna('Unknown')
+    df_ = df_.rename(columns={'ic_site_id': 'domain_url'})
+
+    #st.write('Done ... ')
+    return df_
 
 class CustomEx(Exception):
     def __init__(self, msg):
@@ -53,15 +72,15 @@ class Statistics:
         df.rename(columns=cols, inplace=True)
 
     def custom_print(self, msg):
-        print(f"{'*' * 150}\n{msg}\n{'*' * 150}\n")
+        st.write(f"{'*' * 150}\n{msg}\n{'*' * 150}\n")
 
     def print_table_header(self, feature_name, header, additional_header=''):
         """Helper function for common table printing logic"""
-        print('\n')
-        print(f"{header}")
-        print("=" * 150)
-        print(f"{feature_name.upper():<50} {additional_header}")
-        print('-' * 150)
+        st.write('\n')
+        st.write(f"{header}")
+        st.write("=" * 150)
+        st.write(f"{feature_name.upper():<50} {additional_header}")
+        st.write('-' * 150)
 
     def print_ctr(self, feature_name, ctr, average_ctr, main_feature='advertiser', performance_index_included=False):
         """Print top features by CTR"""
@@ -71,13 +90,13 @@ class Statistics:
             if performance_index_included:
                 performance_index = feature_ctr[1]
                 feature_ctr = feature_ctr[0]
-            print(f"{i}. {str(feature):<50} {feature_ctr:<8.4f} {average_ctr: >10.4}  {performance_index: >12.4}")
+            st.write(f"{i}. {str(feature):<50} {feature_ctr:<8.4f} {average_ctr: >10.4}  {performance_index: >12.4}")
 
     def print_top_influence(self, feature_name, coef_influence):
         """Print influence of features on CTR"""
         self.print_table_header(feature_name, f'Influence of {feature_name} on the CTR (regardless of other features)', 'influence (negative values mean that activating these segments tends to reduce CTR))')
         for i, (feature, influence) in enumerate(coef_influence[:9], 1):
-            print(f"{i}. {feature:<50} {influence:>6.4f}")
+            st.write(f"{i}. {feature:<50} {influence:>6.4f}")
 
     # Best performing feature values
     def top_single_feature_st(self, feature):
@@ -89,7 +108,7 @@ class Adv_Spec_Stat(Statistics):
     def __init__(self, advertiserid):
         self.advertiser_df = pd.read_csv(folder_path + 'advertiser.csv')
         self.advertiserid = advertiserid
-        self.filtered_df = samples_df[samples_df['advertiserid'] == self.advertiserid]
+        self.filtered_df = samples_df[samples_df['advertiserid'] == self.advertiserid].compute()
 
         # Initializing of variables
         self.top_highest_ctr_df = pd.DataFrame()
@@ -104,7 +123,7 @@ class Adv_Spec_Stat(Statistics):
 
     def print_(self):
         self.custom_print(f'Top {self.top_highest_ctr_df.shape[0]} combinations')
-        print(self.top_highest_ctr_df)
+        st.write(self.top_highest_ctr_df)
         self.print_ctr('segment', self.top_segm, self.average_ctr)
         self.print_ctr('category', self.top_cat, self.average_ctr)
         self.print_top_influence('segments', self.top_segm_influence)
@@ -116,7 +135,7 @@ class Adv_Spec_Stat(Statistics):
     def run_pipeline(self):
         name, num = self.check_advid()
         self.custom_print(f'STATISTICAL ANALYSIS OF THE EXISTING DATASET FOR THE ADVERTISER - "{name}" (YEAR 2024)')
-        print('Total number of samples associated with this advertiser in the the dataset: ' , num)
+        st.write('Total number of samples associated with this advertiser in the the dataset: ' , num)
         self.top_combinations()
         self.top_segm_cat()
         self.top_influence()
@@ -263,8 +282,8 @@ class Recommendo_Base(Statistics):
         elements_outside_intersection = set1 - set1.intersection(set2)
 
         if elements_outside_intersection:
-            print(f'There is no elements with this ID in the dataset: {elements_outside_intersection}')
-            print(f'List of available elements: {set2}')
+            st.write(f'There is no elements with this ID in the dataset: {elements_outside_intersection}')
+            st.write(f'List of available elements: {set2}')
             return ([], prefix)
 
         return inp, prefix
@@ -467,7 +486,7 @@ class Recommendo_Base(Statistics):
             population = next_population
 
             #print('Generation:', generation, '  Best iCTR:', best_fitness)
-            print('Generation:', generation, '  Best CTR:', best_fitness)
+            st.write('Generation:', generation, '  Best CTR:', best_fitness)
 
         # Return the top N combinations (sorted by fitness)
         return top_combinations
@@ -641,34 +660,34 @@ class Recommendo_Base(Statistics):
 
     def run_pipeline(self):
         while 1:
-            print('\nWhat are you interested in:')
+            st.write('\nWhat are you interested in:')
             for num, f in enumerate(self.map_feature_coef.keys()):
-                print(f'{"placement" if num == 4 else f}: {num}')
+                st.write(f'{"placement" if num == 4 else f}: {num}')
 
-            print('Best combinations (may take up from 10 to 20 minutes): 6')
+            st.write('Best combinations (may take up from 10 to 20 minutes): 6')
 
             i = int(input('Enter number (0-6) or 7 to exit: ') or 7)
 
             if i == 7:
                 break
             elif i == 6:
-                print(self.run())
+                st.write(self.run())
                 continue
 
             feature = list(self.map_feature_coef.keys())[i]
             get_top_feature = self.top_single_feature(self.map_feature_coef[feature], feature)
             #  Print results
-            print('\n')
+            st.write('\n')
             #self.custom_print('Impression-Weighted Click-Through Rate (iCTR) for providing a balanced view: iCTR=CTR*log(Impressions)')
             # self.custom_print(f"{'Predict.iCTR Range':<22} {'Performance (%)':<20} {feature}")
             # for index, row in get_top_feature.iterrows():
-            #     print(f"{row['iCTR_range']:<22} {row['Performance']:<20.2f} {row[feature]}")
+            #     st.write(f"{row['iCTR_range']:<22} {row['Performance']:<20.2f} {row[feature]}")
 
             self.custom_print(f"{'Predict.CTR Range':<22} {'Performance (%)':<20} {feature}")
             for index, row in get_top_feature.iterrows():
-                print(f"{row['CTR_range']:<22} {row['Performance']:<20.2f} {row[feature]}")
+                st.write(f"{row['CTR_range']:<22} {row['Performance']:<20.2f} {row[feature]}")
 
-            print('\n')
+            st.write('\n')
 
 
 class Recommendo_Adv(Recommendo_Base):
@@ -701,7 +720,7 @@ class Cat_Level_Spec_Stat(Statistics):
         count_non_zero = samples_df[samples_df[self.category_name].isin([1, -1])].shape[0]
         # Average across all segments (regardless of the other features)
         self.average_ctr = self.filtered_df[self.filtered_df[segm_columns].any(axis=1) == 1]['CTR'].mean()
-        print('Total number of samples associated with this category in the dataset: ', count_non_zero)
+        st.write('Total number of samples associated with this category in the dataset: ', count_non_zero)
         self.print_()
 
 
@@ -757,29 +776,83 @@ class Recommendo_No_Adv(Recommendo_Base):
             'site': 40,
         }
 
+def run_adv_stat():
+   stat = Adv_Spec_Stat(st.session_state["adv_id"])
+   stat.run_pipeline()
 
-try:
-    user_story = int(input("Choose the manager type (enter 1 or 2): 1 (default) - Advertising Account Manager, 2 - Category Manager: ") or 1)
 
-    if user_story == 1:
-        adv_id = int(input('Enter the advertiser id (e.g. 4855555657): '))
-        stat = Adv_Spec_Stat(adv_id)
-    elif user_story == 2:
-        category_name = input('Enter the category name using short format i_XXX (e.g. i_559): ')
-        stat = Cat_Level_Spec_Stat(category_name)
+def run():
+    """Update UI elements based on user choice."""
+
+    mapping = {
+        "Advertising Account Manager": 1,
+        "Category Manager": 2
+    }
+
+    # Store the numeric value in session state
+    user_choice = mapping[st.session_state["user_story"]]
+
+    if user_choice == 1:
+        st.number_input(
+            "Enter the advertiser id (e.g. 4855555657):",
+            format="%d",  # Ensures integer format
+            key="adv_id",
+            step=1,  # Makes sure the input increments in whole numbers
+            value=0,  # Default value must be an integer
+            on_change=run_adv_stat
+        )
     else:
-        raise CustomEx('Wrong choice. Possible options: 1 or 2')
+        category_name = st.text_input("Enter the category name using short format i_XXX (e.g. i_559):", key="category_name")
+        if st.button("Run Pipeline"):
+            stat = Cat_Level_Spec_Stat(category_name)
+            stat.run_pipeline()
 
-    stat.run_pipeline()
 
-    if input("\nDo you want to get recommendations (y/n)? default - no: ").lower() == 'y':
-        recom = Recommendo_Adv(adv_id) if user_story == 1 else Recommendo_No_Adv(category_name)
-        recom.run_pipeline()
 
-except CustomEx as e:
-    print(f"Custom Error: {e.msg}")
-except Exception as e:
-    print(e)
+def init_page():
+    st.title("Manager Selection")
+
+    st.radio(
+        "Choose the manager type:",
+        options = ['Advertising Account Manager', 'Category Manager'],
+        index = None,
+        key="user_story",
+        on_change=run
+    )
+
+
+if not st.session_state.get("initialized"):
+    samples_df = load_data(folder_path + 'samples_merged_df.csv')
+    init_page()
+    st.session_state["initialized"] = 1
+
+st.write('Bye')
+
+
+# try:
+#     #user_story = int(input("Choose the manager type (enter 1 or 2): 1 (default) - Advertising Account Manager, 2 - Category Manager: ") or 1)
+#     user_story = st.number_input("Choose the manager type (enter 1 or 2): 1 (default) - Advertising Account Manager, 2 - Category Manager:", placeholder="Type a number...", format="%i", on_change=)
+#     if user_story == 1:
+#         #adv_id = int(input('Enter the advertiser id (e.g. 4855555657): '))
+#         adv_id = st.number_input("Enter the advertiser id (e.g. 4855555657):", format="%d")
+#         st.write('Got it')
+#         stat = Adv_Spec_Stat(adv_id)
+#     elif user_story == 2:
+#         category_name = input('Enter the category name using short format i_XXX (e.g. i_559): ')
+#         stat = Cat_Level_Spec_Stat(category_name)
+#     else:
+#         raise CustomEx('Wrong choice. Possible options: 1 or 2')
+#
+#     stat.run_pipeline()
+#
+#     if input("\nDo you want to get recommendations (y/n)? default - no: ").lower() == 'y':
+#         recom = Recommendo_Adv(adv_id) if user_story == 1 else Recommendo_No_Adv(category_name)
+#         recom.run_pipeline()
+#
+# except CustomEx as e:
+#     st.write(f"Custom Error: {e.msg}")
+# except Exception as e:
+#     st.write(e)
 
 # Advertisers with non-zeros cat/segm field
 
